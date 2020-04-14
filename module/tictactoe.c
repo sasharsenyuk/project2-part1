@@ -41,6 +41,12 @@ static const struct file_operations fops = {
 
 struct d_data {
 	struct cdev cdev;
+	/* Game state */
+	int game_on;	/* Is a game in progress? */
+	char board[9];	/* Array to store the state of the game board */
+	char turn;	/* X/O */
+	char player_token;
+	char computer_token;
 };
 
 /* Global variables */
@@ -72,7 +78,10 @@ static ssize_t d_read(struct file *filp,
 
 static ssize_t d_write(struct file *filp, const char __user *buf,
 		size_t len, loff_t *offset) {
-	printk("Writing to device: %d\n", MINOR(filp->f_path.dentry->d_inode->i_rdev));
+	int d_num;
+	d_num = MINOR(filp->f_path.dentry->d_inode->i_rdev);
+	/*printk("Writing to device: %d\n", MINOR(filp->f_path.dentry->d_inode->i_rdev));*/
+	printk("Writing to device: %d\n", d_num);
 
 	char *msg;
 	msg = NULL;
@@ -102,6 +111,9 @@ static ssize_t d_write(struct file *filp, const char __user *buf,
 	}
 	printk("Newline at %d\n", n_ct);
 	msg[n_ct] = '\0';
+
+	/* ADD A REALLOC */
+
 	printk("Data from the user: %s\n", msg);
 
 	/* Next, split string into tokens
@@ -133,15 +145,21 @@ static ssize_t d_write(struct file *filp, const char __user *buf,
 	/* 00 - begin a new game
 	* takes 1 argument: user's choice of token (X/O) */
 	if (strcmp(cmd, "00") == 0) {
-		if (arg2 != NULL) {
-			printk("INVFMT\n"); /* Too many arguments */
+		if (arg1 == NULL || arg2 != NULL) {
+			printk("INVFMT\n"); /* Not enough arguments */
 			return len;
 		}
 		if (strcmp(arg1, "X") == 0) {
+			cdev_data[d_num].game_on = 1;
+			cdev_data[d_num].player_token = 'X';
+			cdev_data[d_num].computer_token = 'O';
 			printk("User goes first -- OK\n");
 			/* Set turn member variable and tokens*/
 		}
 		else if (strcmp(arg1, "O") == 0) {
+			cdev_data[d_num].game_on = 1;
+			cdev_data[d_num].player_token = 'O';
+			cdev_data[d_num].computer_token = 'X';
 			printk("Computer goes first -- OK\n");
 			/* Set vars */
 		}
@@ -158,7 +176,12 @@ static ssize_t d_write(struct file *filp, const char __user *buf,
 			return len;
 		}
 		/* Reply with the current state of the board */
-		printk("View current state of the board\n");
+		printk("Current state of the board: ");
+		int k;
+		for (k = 0; k < 9; ++k) {
+			printk("%c", cdev_data[d_num].board[k]);
+		}
+		printk("\n");
 	}
 	/* 02 - User makes a move
 	 * takes 2 parameters: column and row, both should be between 0 and 2 */
@@ -167,16 +190,51 @@ static ssize_t d_write(struct file *filp, const char __user *buf,
 			printk("INVFMT\n"); /* Not enough arguments */
 			return len;
 		}
-		/* Check turn */
-		/* Verify move */
+		/* Verify that the game is started / not over */
+		if (cdev_data[d_num].game_on == 0) {
+			printk("NOGAME\n");
+			return len;
+		}
+		/* Verify that it is player's turn */
+		if (cdev_data[d_num].turn != cdev_data[d_num].player_token) {
+			printk("OOT\n");
+			return len;
+		}
+		/* Check if the move is valid */
+		int column, row;
+		column = arg1[0] - 48;
+		row = arg2[0] - 48;
+		if (column < 0 || column > 2 || row < 0 || row > 2) {
+			printk("ILLMOVE\n");
+			return len;
+		}
+		if (cdev_data[d_num].board[column + row * 3] == '*') {
+			cdev_data[d_num].board[column + row * 3] = cdev_data[d_num].player_token;
+			printk("User made a move at %d%d -- OK\n", column, row);
+			cdev_data[d_num].turn = cdev_data[d_num].computer_token;
+		}
+		else {
+			printk("ILLMOVE\n");
+			return len;
+		}
+		/* Check for player win or tie */
 		/* Return OK, WIN, TIE, OOT, or NOGAME */
-		printk("User making a move\n");
 	}
 	/* 03 - Ask computer to make a move
 	 * doesn't take any arguments */
 	else if (strcmp(cmd, "03") == 0) {
 		if (arg1 == NULL && arg2 == NULL) {
-			printk("Computer making a move\n");
+			if (cdev_data[d_num].game_on != 1) {
+				printk("NOGAME\n");
+				return len;
+			}
+			if (cdev_data[d_num].turn != cdev_data[d_num].computer_token) {
+				printk("OOT\n");
+				return len;
+			}
+			printk("Computer making a move -- OK\n");
+			cdev_data[d_num].turn = cdev_data[d_num].player_token;
+			/* Choose a move, check for win */
 		}
 		else {
 			printk("INVFMT\n"); /* Too many arguments */
@@ -184,6 +242,7 @@ static ssize_t d_write(struct file *filp, const char __user *buf,
 		}
 	}
 
+	kfree(msg);
 	return len;
 }
 
@@ -214,6 +273,14 @@ static int __init ttt_init(void) {
 		cdev_data[i].cdev.owner = THIS_MODULE;
 		cdev_add(&cdev_data[i].cdev, MKDEV(major, i), 1);
 		device_create(cdev_class, NULL, MKDEV(major, i), NULL, "tictactoe-%d", i);
+		/* Initialize the game board */
+		int j;
+		for (j = 0; j < 9; ++j) {
+			cdev_data[i].board[j] = '*';
+		}
+		cdev_data[i].turn = 'X';	/* X goes first */
+		cdev_data[i].game_on = 0;	/* Game not started yet */
+		/* Don't know what the tokens will be yet. */
 	}
 	/*
 	major = register_chrdev(0, DEVICE_NAME, &fops);
